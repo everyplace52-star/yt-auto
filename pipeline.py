@@ -1,11 +1,11 @@
 """
 Free YouTube history-documentary pipeline.
-Topic -> script (Gemini) -> voice (edge-tts) -> images (Pexels) -> video (FFmpeg) -> scheduled upload.
+Topic -> script (Gemini) -> voice (edge-tts) -> images (Wikimedia Commons) -> video (FFmpeg) -> scheduled upload.
 
 Run:  python pipeline.py --count 3            (make + upload 3 videos)
       python pipeline.py --count 1 --no-upload (test without uploading)
 """
-import os, csv, json, math, time, random, asyncio, argparse, subprocess, traceback
+import os, sys, csv, json, math, time, random, asyncio, argparse, subprocess, traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -13,7 +13,7 @@ import requests
 import edge_tts
 
 GEMINI_KEY = os.environ["GEMINI_API_KEY"]
-MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+MODEL = os.getenv("GEMINI_MODEL") or "gemini-3.8-flash"
 VOICE = os.getenv("VOICE", "en-US-AndrewNeural")
 SECTIONS = 12                       # 12 x ~280 words = ~22 min
 SLOT_HOURS_UTC = [15, 20, 24]       # ~10am, 3pm, 7pm US Eastern (next-day schedule)
@@ -45,8 +45,10 @@ def gemini(prompt, as_json=False):
             time.sleep(4)  # stay under free-tier rate limits
             return r.json()["candidates"][0]["content"]["parts"][0]["text"]
         last = r.text
+        if r.status_code in (400, 401, 403, 404):
+            break  # wrong key / model name: retrying will not help
         time.sleep(20 * (attempt + 1))
-    raise RuntimeError(f"Gemini failed: {last}")
+    raise RuntimeError(f"Gemini failed (model {MODEL}): {last}")
 
 
 # ---------- 1. script ----------
@@ -224,6 +226,7 @@ def main():
     with open("topics.csv", newline="", encoding="utf-8") as f:
         topics = [r["topic"] for r in csv.DictReader(f) if r["topic"] not in done]
 
+    made, failed = 0, 0
     for k, topic in enumerate(topics[:args.count]):
         print(f"=== {topic}")
         try:
@@ -238,9 +241,15 @@ def main():
             done.append(topic)
             DONE.write_text(json.dumps(done, indent=2))
             subprocess.run(["rm", "-rf", str(d)])  # free disk space
+            made += 1
         except Exception:
             traceback.print_exc()  # skip this topic, continue with the next
+            failed += 1
+
+    print(f"RESULT: {made} video(s) made, {failed} failed")
+    if made == 0 and failed > 0:
+        sys.exit(1)  # make the GitHub run show red instead of a false green
 
 
-if __name__ == "__main__":
+if _name_ == "_main_":
     main()
