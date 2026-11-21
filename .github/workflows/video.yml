@@ -1,1 +1,56 @@
+name: make-videos
 
+on:
+  schedule:
+    - cron: "0 20 * * *"
+  workflow_dispatch:
+    inputs:
+      count:
+        description: "How many videos"
+        default: "1"
+      upload:
+        description: "Upload to YouTube? (true/false)"
+        default: "false"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install ffmpeg and Python packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          pip install -r requirements.txt
+
+      - name: Restore YouTube token
+        env:
+          YT_TOKEN_B64: ${{ secrets.YT_TOKEN_B64 }}
+        run: echo "$YT_TOKEN_B64" | base64 -d > token.json
+
+      - name: Make videos
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+        run: |
+          FLAGS=""
+          if [ "${{ github.event.inputs.upload }}" = "false" ]; then FLAGS="--no-upload"; fi
+          python pipeline.py --count ${{ github.event.inputs.count || '3' }} $FLAGS
+
+      - name: Save progress
+        run: |
+          git config user.name "video-bot"
+          git config user.email "video-bot@users.noreply.github.com"
+          git add done.json || true
+          git commit -m "update progress" || echo "nothing to commit"
+          git push
