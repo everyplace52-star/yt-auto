@@ -2,14 +2,22 @@
 Free YouTube history-documentary pipeline.
 Topic -> script (Gemini) -> voice (edge-tts) -> images (Wikimedia Commons) -> video (FFmpeg) -> scheduled upload.
 """
-import os, sys, csv, json, math, time, random, asyncio, argparse, subprocess, traceback
+import os, re, sys, csv, json, math, time, random, asyncio, argparse, subprocess, traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
 import edge_tts
 
-GEMINI_KEY = os.environ["GEMINI_API_KEY"]
+KEYS = [k for k in [
+    os.environ.get("GEMINI_API_KEY"),
+    os.environ.get("GEMINI_API_KEY_2"),
+    os.environ.get("GEMINI_API_KEY_3"),
+    os.environ.get("GEMINI_API_KEY_4"),
+] if k]
+if not KEYS:
+    raise SystemExit("No GEMINI_API_KEY found")
+KEY_I = [0]
 MODELS = [m for m in [
     os.getenv("GEMINI_MODEL"),
     "gemini-3.8-flash",
@@ -25,7 +33,7 @@ CUR = [0]
 VOICE = os.getenv("VOICE", "en-US-AndrewNeural")
 SECTIONS = 12
 SLOT_HOURS_UTC = [15, 20, 24]
-WORK, OUT, DONE = Path("work"), Path("out"), Path("done.json")
+WORK, OUT, DONE, CACHE = Path("work"), Path("out"), Path("done.json"), Path("cache")
 
 
 def run(cmd):
@@ -47,37 +55,46 @@ def gemini(prompt, as_json=False):
     last = ""
     for rnd in range(3):
         for step in range(len(MODELS)):
-            idx = (CUR[0] + step) % len(MODELS)
-            model = MODELS[idx]
+            midx = (CUR[0] + step) % len(MODELS)
+            model = MODELS[midx]
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-            for attempt in range(3):
-                try:
-                    r = requests.post(url, params={"key": GEMINI_KEY}, json=body, timeout=300)
-                except requests.exceptions.RequestException as e:
-                    last = f"{model}: network/timeout {e}"
-                    print(f"[{model}] attempt {attempt+1} network/timeout", flush=True)
-                    time.sleep(10 * (attempt + 1))
-                    continue
-                if r.status_code == 200:
-                    try:
-                        text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-                    except Exception:
-                        last = f"{model}: empty reply"
-                        print(f"[{model}] empty reply", flush=True)
-                        break
-                    if CUR[0] != idx:
-                        print(f"Now using model: {model}", flush=True)
-                    CUR[0] = idx
-                    time.sleep(4)
-                    return text
-                last = f"{model}: HTTP {r.status_code} {r.text[:200]}"
-                print(f"[{model}] attempt {attempt+1}: HTTP {r.status_code}", flush=True)
-                if r.status_code in (400, 401, 403, 404):
+            model_dead = False
+            for kstep in range(len(KEYS)):
+                if model_dead:
                     break
-                time.sleep(10 * (attempt + 1))
-        print(f"All models busy, waiting 60s (round {rnd+1})", flush=True)
+                kidx = (KEY_I[0] + kstep) % len(KEYS)
+                key = KEYS[kidx]
+                for attempt in range(2):
+                    try:
+                        r = requests.post(url, params={"key": key}, json=body, timeout=300)
+                    except requests.exceptions.RequestException as e:
+                        last = f"{model}: network/timeout {e}"
+                        print(f"[{model}|key{kidx+1}] attempt {attempt+1} network/timeout", flush=True)
+                        time.sleep(10 * (attempt + 1))
+                        continue
+                    if r.status_code == 200:
+                        try:
+                            text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                        except Exception:
+                            last = f"{model}: empty reply"
+                            print(f"[{model}|key{kidx+1}] empty reply", flush=True)
+                            break
+                        if CUR[0] != midx or KEY_I[0] != kidx:
+                            print(f"Now using model: {model} with key {kidx+1}", flush=True)
+                        CUR[0], KEY_I[0] = midx, kidx
+                        time.sleep(4)
+                        return text
+                    last = f"{model}: HTTP {r.status_code} {r.text[:200]}"
+                    print(f"[{model}|key{kidx+1}] attempt {attempt+1}: HTTP {r.status_code}", flush=True)
+                    if r.status_code == 404:
+                        model_dead = True
+                        break
+                    if r.status_code in (400, 401, 403, 429):
+                        break
+                    time.sleep(10 * (attempt + 1))
+        print(f"All models and keys busy, waiting 60s (round {rnd+1})", flush=True)
         time.sleep(60)
-    raise RuntimeError(f"Gemini failed on all models: {last}")
+    raise RuntimeError(f"Gemini failed on all models and keys: {last}")
 
 
 def make_script(topic):
@@ -110,8 +127,41 @@ Rules:
     return outline, scenes
 
 
+def load_or_make_script(topic):
+    slug = re.sub(r"[^a-z0-9]+", "-", topic.lower()).strip("-")[:60]
+    f = CACHE / f"{slug}.json"
+    if f.exists():
+        d = json.loads(f.read_text(encoding="utf-8"))
+        print("Using saved script (no Gemini needed)", flush=True)
+        return d["outline"], d["scenes"]
+    outline, scenes = make_script(topic)
+    CACHE.mkdir(exist_ok=True)
+    f.write_text(json.dumps({"outline": outline, "scenes": scenes}), encoding="utf-8")
+    print("Script saved", flush=True)
+    return outline, scenes
+
+
+def clean_text(t):
+    t = re.sub(r"[*#`]+", "", str(t))
+    return re.sub(r"\s+", " ", t).strip()
+
+
 def tts(text, path):
-    asyncio.run(edge_tts.Communicate(text, VOICE).save(str(path)))
+    text = clean_text(text)
+    if len(text) < 20:
+        raise RuntimeError("Narration text is empty or too short")
+    last = None
+    for attempt in range(6):
+        try:
+            asyncio.run(edge_tts.Communicate(text, VOICE).save(str(path)))
+            if Path(path).exists() and Path(path).stat().st_size > 1000:
+                return
+            last = "audio file too small"
+        except Exception as e:
+            last = e
+        print(f"voice attempt {attempt+1} failed: {type(last)._name_}", flush=True)
+        time.sleep(5 * (attempt + 1))
+    raise RuntimeError(f"Voice failed after 6 tries: {last}")
 
 
 UA = {"User-Agent": "yt-auto-history-bot/1.0 (personal educational project)"}
@@ -175,11 +225,13 @@ def fetch_images(keywords, n, dest):
 
 
 def build_scene(i, scene, d):
+    print(f"Scene {i+1}/{SECTIONS}: voice", flush=True)
     audio = d / f"a{i}.mp3"
     tts(scene["narration"], audio)
     dur = duration(audio)
     n = max(1, math.ceil(dur / 8))
     each = dur / n + 0.05
+    print(f"Scene {i+1}/{SECTIONS}: images", flush=True)
     imgs = fetch_images(scene["keywords"], n, d)
 
     clips = []
@@ -244,6 +296,7 @@ def main():
     ap.add_argument("--no-upload", action="store_true")
     args = ap.parse_args()
 
+    print(f"Gemini keys loaded: {len(KEYS)}", flush=True)
     OUT.mkdir(exist_ok=True)
     done = json.loads(DONE.read_text()) if DONE.exists() else []
     with open("topics.csv", newline="", encoding="utf-8") as f:
@@ -255,7 +308,7 @@ def main():
         try:
             d = WORK / f"v{len(done)+1}"
             d.mkdir(parents=True, exist_ok=True)
-            outline, scenes = make_script(topic)
+            outline, scenes = load_or_make_script(topic)
             final = OUT / f"{len(done)+1:03d}.mp4"
             render(scenes, d, final)
             if not args.no_upload:
