@@ -36,11 +36,18 @@ def gemini(prompt, as_json=False):
         body["generationConfig"] = {"responseMimeType": "application/json"}
     last = ""
     for attempt in range(6):
-        r = requests.post(url, params={"key": GEMINI_KEY}, json=body, timeout=180)
+        try:
+            r = requests.post(url, params={"key": GEMINI_KEY}, json=body, timeout=420)
+        except requests.exceptions.RequestException as e:
+            last = f"network/timeout: {e}"
+            print(f"Gemini attempt {attempt+1} failed: {last}", flush=True)
+            time.sleep(15 * (attempt + 1))
+            continue
         if r.status_code == 200:
             time.sleep(4)
             return r.json()["candidates"][0]["content"]["parts"][0]["text"]
         last = r.text
+        print(f"Gemini attempt {attempt+1}: HTTP {r.status_code}", flush=True)
         if r.status_code in (400, 401, 403, 404):
             break
         time.sleep(20 * (attempt + 1))
@@ -218,7 +225,7 @@ def main():
 
     made, failed = 0, 0
     for k, topic in enumerate(topics[:args.count]):
-        print(f"=== {topic}")
+        print(f"=== {topic}", flush=True)
         try:
             d = WORK / f"v{len(done)+1}"
             d.mkdir(parents=True, exist_ok=True)
@@ -236,7 +243,7 @@ def main():
             traceback.print_exc()
             failed += 1
 
-    print(f"RESULT: {made} video(s) made, {failed} failed")
+    print(f"RESULT: {made} video(s) made, {failed} failed", flush=True)
     if made == 0 and failed > 0:
         sys.exit(1)
 
