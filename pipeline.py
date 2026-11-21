@@ -1,9 +1,6 @@
 """
 Free YouTube history-documentary pipeline.
 Topic -> script (Gemini) -> voice (edge-tts) -> images (Wikimedia Commons) -> video (FFmpeg) -> scheduled upload.
-
-Run:  python pipeline.py --count 3            (make + upload 3 videos)
-      python pipeline.py --count 1 --no-upload (test without uploading)
 """
 import os, sys, csv, json, math, time, random, asyncio, argparse, subprocess, traceback
 from datetime import datetime, timedelta, timezone
@@ -15,12 +12,11 @@ import edge_tts
 GEMINI_KEY = os.environ["GEMINI_API_KEY"]
 MODEL = os.getenv("GEMINI_MODEL") or "gemini-3.8-flash"
 VOICE = os.getenv("VOICE", "en-US-AndrewNeural")
-SECTIONS = 12                       # 12 x ~280 words = ~22 min
-SLOT_HOURS_UTC = [15, 20, 24]       # ~10am, 3pm, 7pm US Eastern (next-day schedule)
+SECTIONS = 12
+SLOT_HOURS_UTC = [15, 20, 24]
 WORK, OUT, DONE = Path("work"), Path("out"), Path("done.json")
 
 
-# ---------- helpers ----------
 def run(cmd):
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
@@ -42,16 +38,15 @@ def gemini(prompt, as_json=False):
     for attempt in range(6):
         r = requests.post(url, params={"key": GEMINI_KEY}, json=body, timeout=180)
         if r.status_code == 200:
-            time.sleep(4)  # stay under free-tier rate limits
+            time.sleep(4)
             return r.json()["candidates"][0]["content"]["parts"][0]["text"]
         last = r.text
         if r.status_code in (400, 401, 403, 404):
-            break  # wrong key / model name: retrying will not help
+            break
         time.sleep(20 * (attempt + 1))
     raise RuntimeError(f"Gemini failed (model {MODEL}): {last}")
 
 
-# ---------- 1. script ----------
 def make_script(topic):
     outline = json.loads(gemini(f"""
 You are a documentary writer for a US YouTube history channel.
@@ -82,12 +77,10 @@ Rules:
     return outline, scenes
 
 
-# ---------- 2. voice ----------
 def tts(text, path):
     asyncio.run(edge_tts.Communicate(text, VOICE).save(str(path)))
 
 
-# ---------- 3. visuals (Wikimedia Commons, no API key) ----------
 UA = {"User-Agent": "yt-auto-history-bot/1.0 (personal educational project)"}
 FREE_LICENSES = ("public domain", "cc0", "pd", "no restrictions")
 
@@ -109,7 +102,7 @@ def commons_search(query, limit=30):
             continue
         lic = info.get("extmetadata", {}).get("LicenseShortName", {}).get("value", "").lower()
         if not any(k in lic for k in FREE_LICENSES):
-            continue  # keep only public-domain / CC0 images
+            continue
         out.append(info.get("thumburl") or info.get("url"))
     return out
 
@@ -143,12 +136,11 @@ def fetch_images(keywords, n, dest):
         time.sleep(0.5)
     if not paths:
         raise RuntimeError("Image download failed")
-    while len(paths) < n:           # reuse images if fewer than needed
+    while len(paths) < n:
         paths.append(paths[len(paths) % len(paths)])
     return paths
 
 
-# ---------- 4. render ----------
 def build_scene(i, scene, d):
     audio = d / f"a{i}.mp3"
     tts(scene["narration"], audio)
@@ -185,7 +177,6 @@ def render(scenes, d, final):
     run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", str(final)])
 
 
-# ---------- 5. upload ----------
 def upload(path, outline, publish_at):
     from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
@@ -197,7 +188,7 @@ def upload(path, outline, publish_at):
     body = {
         "snippet": {"title": outline["title"][:100], "description": outline["description"],
                     "tags": outline["tags"][:15], "categoryId": "27"},
-        "status": {"privacyStatus": "private",  # required for scheduled publishing
+        "status": {"privacyStatus": "private",
                    "publishAt": publish_at, "selfDeclaredMadeForKids": False},
     }
     req = yt.videos().insert(part="snippet,status", body=body,
@@ -214,7 +205,6 @@ def publish_time(k):
     return (base + timedelta(hours=SLOT_HOURS_UTC[k % len(SLOT_HOURS_UTC)])).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-# ---------- main ----------
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--count", type=int, default=3)
@@ -240,15 +230,15 @@ def main():
                 print("uploaded:", vid)
             done.append(topic)
             DONE.write_text(json.dumps(done, indent=2))
-            subprocess.run(["rm", "-rf", str(d)])  # free disk space
+            subprocess.run(["rm", "-rf", str(d)])
             made += 1
         except Exception:
-            traceback.print_exc()  # skip this topic, continue with the next
+            traceback.print_exc()
             failed += 1
 
     print(f"RESULT: {made} video(s) made, {failed} failed")
     if made == 0 and failed > 0:
-        sys.exit(1)  # make the GitHub run show red instead of a false green
+        sys.exit(1)
 
 
-if _name_ == "_main_":
+main()
