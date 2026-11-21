@@ -4,11 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       count:
-        description: "How many videos"
+        description: "How many documentary videos to create"
+        required: true
         default: "1"
-      upload:
-        description: "Upload to YouTube? (true/false)"
-        default: "false"
+        type: string
 
 permissions:
   contents: write
@@ -17,64 +16,83 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 330
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
 
-      - name: Install ffmpeg and Python packages
+      - name: Install FFmpeg
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
+
+      - name: Install Python packages
+        run: |
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install -U edge-tts
+          pip install --upgrade edge-tts
 
       - name: Restore saved scripts
         uses: actions/cache/restore@v4
         with:
           path: cache
-          key: scripts-${{ github.run_id }}
-          restore-keys: scripts-
+          key: scripts-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            scripts-${{ github.ref_name }}-
+            scripts-
 
-      - name: Restore YouTube token
+      - name: Check Gemini API key
         env:
-          YT_TOKEN_B64: ${{ secrets.YT_TOKEN_B64 }}
-        run: echo "$YT_TOKEN_B64" | base64 -d > token.json
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          if [ -z "$GEMINI_API_KEY" ]; then
+            echo "GEMINI_API_KEY is missing."
+            exit 1
+          fi
 
-      - name: Make videos
+      - name: Create real 2 minute documentary
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
           GEMINI_API_KEY_3: ${{ secrets.GEMINI_API_KEY_3 }}
           GEMINI_API_KEY_4: ${{ secrets.GEMINI_API_KEY_4 }}
         run: |
-          FLAGS=""
-          if [ "${{ github.event.inputs.upload }}" = "false" ]; then FLAGS="--no-upload"; fi
-          python pipeline.py --count ${{ github.event.inputs.count || '3' }} $FLAGS
+          python pipeline.py \
+            --count "${{ inputs.count }}" \
+            --minutes 2 \
+            --no-upload
 
       - name: Save scripts for next run
         if: always()
         uses: actions/cache/save@v4
         with:
           path: cache
-          key: scripts-${{ github.run_id }}
+          key: scripts-${{ github.ref_name }}-${{ github.run_id }}
 
-      - name: Save video for download
+      - name: Save documentary video
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: videos
+          name: documentary-videos-${{ github.run_number }}
           path: out/*.mp4
           if-no-files-found: warn
-          retention-days: 3
+          retention-days: 7
 
       - name: Save progress
-        if: ${{ github.event.inputs.upload != 'false' }}
+        if: always()
         run: |
-          git config user.name "video-bot"
-          git config user.email "video-bot@users.noreply.github.com"
-          git add done.json || true
-          git commit -m "update progress" || echo "nothing to commit"
-          git push
+          if [ -f done.json ]; then
+            git config user.name "video-bot"
+            git config user.email "video-bot@users.noreply.github.com"
+            git add done.json
+            git commit -m "save documentary progress" || true
+            git push || true
+          else
+            echo "done.json not found. Skipping progress save."
+          fi
