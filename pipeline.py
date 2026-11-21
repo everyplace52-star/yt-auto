@@ -13,7 +13,6 @@ import requests
 import edge_tts
 
 GEMINI_KEY = os.environ["GEMINI_API_KEY"]
-PEXELS_KEY = os.environ["PEXELS_API_KEY"]
 MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 VOICE = os.getenv("VOICE", "en-US-AndrewNeural")
 SECTIONS = 12                       # 12 x ~280 words = ~22 min
@@ -74,7 +73,7 @@ Rules:
 - About 280 words of spoken narration, plain prose, no headings or stage directions.
 - {"Open with a gripping hook in the first two sentences." if i == 0 else "Continue smoothly from the previous section."}
 - Only state facts you are confident are true. Do NOT invent quotes, numbers or dates.
-- Return JSON: {{"narration": "...", "keywords": ["3 short image-search phrases"]}}
+- Return JSON: {{"narration": "...", "keywords": ["3 specific search phrases for Wikimedia Commons historical photos, paintings or maps, using names of people, places or events"]}}
 """, as_json=True))
         scenes.append(data)
         prev_end = data["narration"][-150:]
@@ -86,30 +85,64 @@ def tts(text, path):
     asyncio.run(edge_tts.Communicate(text, VOICE).save(str(path)))
 
 
-# ---------- 3. visuals ----------
+# ---------- 3. visuals (Wikimedia Commons, no API key) ----------
+UA = {"User-Agent": "yt-auto-history-bot/1.0 (personal educational project)"}
+FREE_LICENSES = ("public domain", "cc0", "pd", "no restrictions")
+
+
+def commons_search(query, limit=30):
+    r = requests.get(
+        "https://commons.wikimedia.org/w/api.php", headers=UA, timeout=30,
+        params={"action": "query", "format": "json", "generator": "search",
+                "gsrnamespace": 6, "gsrsearch": query, "gsrlimit": limit,
+                "prop": "imageinfo", "iiprop": "url|mime|size|extmetadata",
+                "iiurlwidth": 1920})
+    pages = r.json().get("query", {}).get("pages", {}).values()
+    out = []
+    for pg in pages:
+        info = (pg.get("imageinfo") or [{}])[0]
+        if info.get("mime") not in ("image/jpeg", "image/png"):
+            continue
+        if info.get("width", 0) < 1000:
+            continue
+        lic = info.get("extmetadata", {}).get("LicenseShortName", {}).get("value", "").lower()
+        if not any(k in lic for k in FREE_LICENSES):
+            continue  # keep only public-domain / CC0 images
+        out.append(info.get("thumburl") or info.get("url"))
+    return out
+
+
 def fetch_images(keywords, n, dest):
     urls = []
-    for kw in keywords + ["old historic map", "vintage black and white photo"]:
+    for kw in keywords + ["historical map", "historical illustration"]:
         try:
-            r = requests.get("https://api.pexels.com/v1/search",
-                             headers={"Authorization": PEXELS_KEY},
-                             params={"query": kw, "per_page": 6, "orientation": "landscape"},
-                             timeout=30)
-            urls += [p["src"]["large2x"] for p in r.json().get("photos", [])]
+            urls += commons_search(kw)
         except Exception:
             pass
         if len(set(urls)) >= n:
             break
+        time.sleep(1)
     urls = list(dict.fromkeys(urls))
     random.shuffle(urls)
     if not urls:
         raise RuntimeError("No images found")
-    paths = []
-    for j in range(n):
-        u = urls[j % len(urls)]
-        p = dest / f"img{j}.jpg"
-        p.write_bytes(requests.get(u, timeout=60).content)
-        paths.append(p)
+    paths, i = [], 0
+    while len(paths) < n and i < n + len(urls) * 2:
+        u = urls[i % len(urls)]
+        i += 1
+        try:
+            resp = requests.get(u, headers=UA, timeout=60)
+            resp.raise_for_status()
+        except Exception:
+            continue
+        pth = dest / f"img{len(paths)}.jpg"
+        pth.write_bytes(resp.content)
+        paths.append(pth)
+        time.sleep(0.5)
+    if not paths:
+        raise RuntimeError("Image download failed")
+    while len(paths) < n:           # reuse images if fewer than needed
+        paths.append(paths[len(paths) % len(paths)])
     return paths
 
 
