@@ -1,8 +1,6 @@
 name: make-videos
 
 on:
-  schedule:
-    - cron: "0 20 * * *"
   workflow_dispatch:
     inputs:
       count:
@@ -41,13 +39,22 @@ jobs:
       - name: Make videos
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
         run: |
           FLAGS=""
           if [ "${{ github.event.inputs.upload }}" = "false" ]; then FLAGS="--no-upload"; fi
           python pipeline.py --count ${{ github.event.inputs.count || '3' }} $FLAGS
 
+      - name: Save video for download
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: videos
+          path: out/*.mp4
+          if-no-files-found: warn
+          retention-days: 3
+
       - name: Save progress
+        if: ${{ github.event.inputs.upload != 'false' }}
         run: |
           git config user.name "video-bot"
           git config user.email "video-bot@users.noreply.github.com"
