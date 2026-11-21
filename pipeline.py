@@ -10,7 +10,18 @@ import requests
 import edge_tts
 
 GEMINI_KEY = os.environ["GEMINI_API_KEY"]
-MODEL = os.getenv("GEMINI_MODEL") or "gemini-3.8-flash"
+MODELS = [m for m in [
+    os.getenv("GEMINI_MODEL"),
+    "gemini-3.8-flash",
+    "gemini-3.5-flash",
+    "gemini-3-flash-preview",
+    "gemini-flash-latest",
+    "gemini-3.1-flash-lite",
+    "gemini-flash-lite-latest",
+    "gemini-2.5-flash-lite",
+    "gemini-3.1-pro-preview",
+] if m]
+CUR = [0]
 VOICE = os.getenv("VOICE", "en-US-AndrewNeural")
 SECTIONS = 12
 SLOT_HOURS_UTC = [15, 20, 24]
@@ -30,28 +41,43 @@ def duration(path):
 
 
 def gemini(prompt, as_json=False):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
     body = {"contents": [{"parts": [{"text": prompt}]}]}
     if as_json:
         body["generationConfig"] = {"responseMimeType": "application/json"}
     last = ""
-    for attempt in range(6):
-        try:
-            r = requests.post(url, params={"key": GEMINI_KEY}, json=body, timeout=420)
-        except requests.exceptions.RequestException as e:
-            last = f"network/timeout: {e}"
-            print(f"Gemini attempt {attempt+1} failed: {last}", flush=True)
-            time.sleep(15 * (attempt + 1))
-            continue
-        if r.status_code == 200:
-            time.sleep(4)
-            return r.json()["candidates"][0]["content"]["parts"][0]["text"]
-        last = r.text
-        print(f"Gemini attempt {attempt+1}: HTTP {r.status_code}", flush=True)
-        if r.status_code in (400, 401, 403, 404):
-            break
-        time.sleep(20 * (attempt + 1))
-    raise RuntimeError(f"Gemini failed (model {MODEL}): {last}")
+    for rnd in range(3):
+        for step in range(len(MODELS)):
+            idx = (CUR[0] + step) % len(MODELS)
+            model = MODELS[idx]
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+            for attempt in range(3):
+                try:
+                    r = requests.post(url, params={"key": GEMINI_KEY}, json=body, timeout=300)
+                except requests.exceptions.RequestException as e:
+                    last = f"{model}: network/timeout {e}"
+                    print(f"[{model}] attempt {attempt+1} network/timeout", flush=True)
+                    time.sleep(10 * (attempt + 1))
+                    continue
+                if r.status_code == 200:
+                    try:
+                        text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                    except Exception:
+                        last = f"{model}: empty reply"
+                        print(f"[{model}] empty reply", flush=True)
+                        break
+                    if CUR[0] != idx:
+                        print(f"Now using model: {model}", flush=True)
+                    CUR[0] = idx
+                    time.sleep(4)
+                    return text
+                last = f"{model}: HTTP {r.status_code} {r.text[:200]}"
+                print(f"[{model}] attempt {attempt+1}: HTTP {r.status_code}", flush=True)
+                if r.status_code in (400, 401, 403, 404):
+                    break
+                time.sleep(10 * (attempt + 1))
+        print(f"All models busy, waiting 60s (round {rnd+1})", flush=True)
+        time.sleep(60)
+    raise RuntimeError(f"Gemini failed on all models: {last}")
 
 
 def make_script(topic):
